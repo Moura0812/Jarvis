@@ -31,18 +31,11 @@ def tentar_acao(frase):
     return "Isso nao esta na minha lista de permissoes."
 
 
-def responder(frase):
-    acao = tentar_acao(frase)
-    if acao is not None:
-        return acao
-    return cerebro.perguntar(frase)
-
-
 def principal():
     voz.falar("Jarvis online. Pode falar.")
     while True:
         try:
-            frase = ouvidos.ouvir(6)
+            frase = ouvidos.ouvir()
         except Exception as erro:
             print("Erro ao ouvir:", erro)
             continue
@@ -52,13 +45,24 @@ def principal():
         if any(p in limpar(frase).split() for p in PALAVRAS_SAIR):
             voz.falar("Encerrando. Ate logo.")
             break
+        acao = tentar_acao(frase)
+        if acao is not None:
+            print("Jarvis:", acao)
+            voz.falar(acao)
+            continue
         try:
-            resposta = responder(frase)
+            pedacos = cerebro.perguntar_em_pedacos(frase)
+
+            def mostrar():
+                for p in pedacos:
+                    print(p, end="", flush=True)
+                    yield p
+
+            voz.falar_em_pedacos(mostrar())
+            print()
         except Exception as erro:
-            resposta = "Tive um problema para responder."
             print("Erro:", erro)
-        print("Jarvis:", resposta)
-        voz.falar(resposta)
+            voz.falar("Tive um problema para responder.")
 
 
 if __name__ == "__main__":
