@@ -7,12 +7,21 @@ import ouvidos
 import voz
 
 PALAVRAS_SAIR = ("sair", "encerrar", "tchau", "desligar")
+ATIVACAO = ("jarvis", "jarves", "jarvi", "charvis", "garvis")
 
 
 def limpar(texto):
     texto = unicodedata.normalize("NFD", texto.lower())
     texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
     return re.sub(r"[^a-z0-9 ]", " ", texto).strip()
+
+
+def extrair_comando(frase):
+    palavras = limpar(frase).split()
+    for i, p in enumerate(palavras):
+        if p in ATIVACAO:
+            return " ".join(palavras[i + 1 :]).strip()
+    return None
 
 
 def tentar_acao(frase):
@@ -42,16 +51,22 @@ def principal():
         if not frase:
             continue
         print("Voce:", frase)
-        if any(p in limpar(frase).split() for p in PALAVRAS_SAIR):
+        comando = extrair_comando(frase)
+        if comando is None:
+            continue
+        if comando == "":
+            voz.falar("Sim, senhor?")
+            continue
+        if any(p in limpar(comando).split() for p in PALAVRAS_SAIR):
             voz.falar("Encerrando. Ate logo.")
             break
-        acao = tentar_acao(frase)
+        acao = tentar_acao(comando)
         if acao is not None:
             print("Jarvis:", acao)
             voz.falar(acao)
             continue
         try:
-            pedacos = cerebro.perguntar_em_pedacos(frase)
+            pedacos = cerebro.perguntar_em_pedacos(comando)
 
             def mostrar():
                 for p in pedacos:
