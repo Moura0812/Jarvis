@@ -1,5 +1,7 @@
 import math
+import os
 import queue
+import re
 import threading
 import time
 import tkinter as tk
@@ -12,17 +14,19 @@ from jarvis import PALAVRAS_SAIR, limpar, tentar_acao
 
 ATIVACAO = ("jarvis", "jarves", "jarvi", "charvis", "garvis")
 SILENCIO = ("silencio", "fica quieto", "fique quieto", "cala a boca", "para de falar")
+CLIMA_PADRAO = "Brasilia: consultando a previsao"
 
-FUNDO = "#16181d"
-PAINEL = "#1f2229"
-BOLHA_VOCE = "#2a2e38"
-BOLHA_JARVIS = "#16344a"
-TEXTO = "#e6e6e6"
-SUAVE = "#8a8f9c"
+FUNDO = "#0b0f16"
+PAINEL = "#111827"
+BOLHA_VOCE = "#1f2937"
+BOLHA_JARVIS = "#0c3a52"
+TEXTO = "#e5f1ff"
+SUAVE = "#7b93ad"
+AZUL = "#38bdf8"
 CORES = {
-    "dormindo": "#6b7280",
+    "dormindo": "#4b5563",
     "ouvindo": "#22c55e",
-    "falando": "#4fc3f7",
+    "falando": "#38bdf8",
     "pensando": "#f59e0b",
 }
 
@@ -50,20 +54,48 @@ def misturar(cor_a, cor_b, f):
     return "#" + "".join(f"{int(x + (y - x) * f):02x}" for x, y in zip(a, b))
 
 
-def retangulo_arredondado(canvas, x0, y0, x1, y1, r, cor):
-    passos = 8
-    cantos = [
-        (x1 - r, y0 + r, -90, 0),
-        (x1 - r, y1 - r, 0, 90),
-        (x0 + r, y1 - r, 90, 180),
-        (x0 + r, y0 + r, 180, 270),
-    ]
-    pontos = []
-    for cx, cy, a0, a1 in cantos:
-        for i in range(passos + 1):
-            a = math.radians(a0 + (a1 - a0) * i / passos)
-            pontos += [cx + r * math.cos(a), cy + r * math.sin(a)]
-    return canvas.create_polygon(pontos, fill=cor, smooth=False)
+def ler_emails_recentes(quantidade=5):
+    """Le os e-mails recentes da caixa de entrada, somente para leitura.
+    Devolve uma lista de dicionarios, ou None se o Gmail nao estiver conectado."""
+    if not os.path.exists("credenciais.json") and not os.path.exists("token.json"):
+        return None
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        from googleapiclient.discovery import build
+
+        escopos = ["https://www.googleapis.com/auth/gmail.readonly"]
+        credencial = None
+        if os.path.exists("token.json"):
+            credencial = Credentials.from_authorized_user_file("token.json", escopos)
+        if not credencial or not credencial.valid:
+            if credencial and credencial.expired and credencial.refresh_token:
+                credencial.refresh(Request())
+            else:
+                fluxo = InstalledAppFlow.from_client_secrets_file("credenciais.json", escopos)
+                credencial = fluxo.run_local_server(port=0)
+            with open("token.json", "w", encoding="utf-8") as f:
+                f.write(credencial.to_json())
+        servico = build("gmail", "v1", credentials=credencial, cache_discovery=False)
+        lista = servico.users().messages().list(
+            userId="me", labelIds=["INBOX"], maxResults=quantidade
+        ).execute()
+        emails = []
+        for item in lista.get("messages", []):
+            msg = servico.users().messages().get(
+                userId="me", id=item["id"], format="metadata",
+                metadataHeaders=["From", "Subject", "Date"],
+            ).execute()
+            cabecalhos = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
+            emails.append({
+                "de": re.sub(r"<.*?>", "", cabecalhos.get("From", "")).strip().strip('"')[:34],
+                "assunto": cabecalhos.get("Subject", "(sem assunto)")[:60],
+            })
+        return emails
+    except Exception as erro:
+        print("Gmail:", erro)
+        return None
 
 
 class Interface:
@@ -74,51 +106,70 @@ class Interface:
         self.acordado = False
         self.rodando = True
         self.estado = "dormindo"
+        self.clima = CLIMA_PADRAO
+        self.emails = None
         self.ultima_acao = "nenhuma ainda"
         self.inicio = time.time()
 
         raiz.title("Jarvis")
-        raiz.geometry("820x600")
+        raiz.geometry("1000x640")
         raiz.configure(bg=FUNDO)
-        raiz.minsize(700, 480)
+        raiz.minsize(820, 520)
 
-        self._montar_painel_lateral()
-        self._montar_conversa()
+        self._montar_esquerda()
+        self._montar_direita()
+        self._montar_centro()
 
         self.raiz.after(100, self._processar_fila)
         self.raiz.after(60, self._pulsar)
-        self._atualizar_relogio()
+        self.raiz.after(1000, self._atualizar_painel)
+        threading.Thread(target=self._carregar_emails, daemon=True).start()
         threading.Thread(target=self._loop_escuta, daemon=True).start()
         raiz.protocol("WM_DELETE_WINDOW", self.fechar)
 
-    def _montar_painel_lateral(self):
-        lateral = tk.Frame(self.raiz, bg=PAINEL, width=220)
-        lateral.pack(side="left", fill="y", padx=(12, 0), pady=12)
-        lateral.pack_propagate(False)
+    def _montar_esquerda(self):
+        painel = tk.Frame(self.raiz, bg=PAINEL, width=220)
+        painel.pack(side="left", fill="y", padx=(12, 6), pady=12)
+        painel.pack_propagate(False)
+        tk.Label(painel, text="HORA", bg=PAINEL, fg=SUAVE, font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=16, pady=(14, 0))
+        self.label_hora = tk.Label(painel, text="", bg=PAINEL, fg=TEXTO, font=("Segoe UI", 26, "bold"))
+        self.label_hora.pack(anchor="w", padx=16)
+        self.label_data = tk.Label(painel, text="", bg=PAINEL, fg=SUAVE, font=("Segoe UI", 10))
+        self.label_data.pack(anchor="w", padx=16, pady=(0, 18))
 
-        self.canvas_estado = tk.Canvas(lateral, width=180, height=180, bg=PAINEL, highlightthickness=0)
-        self.canvas_estado.pack(pady=(18, 6))
-        self.circulo = self.canvas_estado.create_oval(30, 30, 150, 150, fill=CORES["dormindo"], outline="")
+        tk.Label(painel, text="CLIMA", bg=PAINEL, fg=SUAVE, font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=16)
+        self.label_clima = tk.Label(painel, text=self.clima, bg=PAINEL, fg=TEXTO,
+                                    font=("Segoe UI", 10), wraplength=190, justify="left")
+        self.label_clima.pack(anchor="w", padx=16, pady=(0, 18))
 
-        self.label_estado = tk.Label(lateral, text="DORMINDO", bg=PAINEL, fg=TEXTO,
-                                     font=("Segoe UI", 13, "bold"))
-        self.label_estado.pack()
-        self.label_dica = tk.Label(lateral, text="Diga Jarvis para me chamar", bg=PAINEL, fg=SUAVE,
-                                   font=("Segoe UI", 9), wraplength=190)
-        self.label_dica.pack(pady=(2, 18))
-
-        tk.Label(lateral, text="HORA", bg=PAINEL, fg=SUAVE, font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=18)
-        self.label_hora = tk.Label(lateral, text="", bg=PAINEL, fg=TEXTO, font=("Segoe UI", 18))
-        self.label_hora.pack(anchor="w", padx=18, pady=(0, 14))
-
-        tk.Label(lateral, text="ULTIMA ACAO", bg=PAINEL, fg=SUAVE, font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=18)
-        self.label_acao = tk.Label(lateral, text=self.ultima_acao, bg=PAINEL, fg=TEXTO,
+        tk.Label(painel, text="ULTIMA ACAO", bg=PAINEL, fg=SUAVE, font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=16)
+        self.label_acao = tk.Label(painel, text=self.ultima_acao, bg=PAINEL, fg=TEXTO,
                                    font=("Segoe UI", 10), wraplength=190, justify="left")
-        self.label_acao.pack(anchor="w", padx=18)
+        self.label_acao.pack(anchor="w", padx=16)
 
-    def _montar_conversa(self):
+    def _montar_direita(self):
+        painel = tk.Frame(self.raiz, bg=PAINEL, width=260)
+        painel.pack(side="right", fill="y", padx=(6, 12), pady=12)
+        painel.pack_propagate(False)
+        tk.Label(painel, text="E-MAILS RECENTES (SO LEITURA)", bg=PAINEL, fg=SUAVE,
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=16, pady=(14, 8))
+        self.label_emails = tk.Label(painel, text="Carregando...", bg=PAINEL, fg=TEXTO,
+                                     font=("Segoe UI", 9), wraplength=230, justify="left")
+        self.label_emails.pack(anchor="w", padx=16, fill="x")
+
+    def _montar_centro(self):
         meio = tk.Frame(self.raiz, bg=FUNDO)
-        meio.pack(side="left", fill="both", expand=True, padx=12, pady=12)
+        meio.pack(side="left", fill="both", expand=True, padx=6, pady=12)
+
+        self.canvas_nucleo = tk.Canvas(meio, height=170, bg=FUNDO, highlightthickness=0)
+        self.canvas_nucleo.pack(fill="x")
+        self.anel_externo = self.canvas_nucleo.create_oval(0, 0, 0, 0, outline=AZUL, width=2)
+        self.anel_medio = self.canvas_nucleo.create_oval(0, 0, 0, 0, outline=AZUL, width=1)
+        self.nucleo = self.canvas_nucleo.create_oval(0, 0, 0, 0, fill=CORES["dormindo"], outline="")
+        self.label_estado = tk.Label(meio, text="DORMINDO", bg=FUNDO, fg=TEXTO, font=("Segoe UI", 12, "bold"))
+        self.label_estado.pack()
+        self.label_dica = tk.Label(meio, text="Diga Jarvis para me chamar", bg=FUNDO, fg=SUAVE, font=("Segoe UI", 9))
+        self.label_dica.pack(pady=(0, 8))
 
         self.area = tk.Canvas(meio, bg=FUNDO, highlightthickness=0)
         self.area.pack(fill="both", expand=True)
@@ -127,41 +178,49 @@ class Interface:
 
         barra = tk.Frame(meio, bg=FUNDO)
         barra.pack(fill="x", pady=(8, 0))
-
-        self.entrada = tk.Entry(barra, font=("Segoe UI", 11), bg="#2b2f3a", fg=TEXTO,
+        self.entrada = tk.Entry(barra, font=("Segoe UI", 11), bg="#1a2333", fg=TEXTO,
                                 insertbackground=TEXTO, relief="flat")
         self.entrada.pack(side="left", fill="x", expand=True, ipady=8)
         self.entrada.bind("<Return>", lambda e: self.enviar_digitado())
-
-        self.botao = tk.Button(barra, text="Enviar", command=self.enviar_digitado,
-                               bg="#0277bd", fg="white", relief="flat", padx=16, pady=6)
-        self.botao.pack(side="left", padx=(8, 0))
+        tk.Button(barra, text="Enviar", command=self.enviar_digitado,
+                  bg="#0369a1", fg="white", relief="flat", padx=16, pady=6).pack(side="left", padx=(8, 0))
 
     def _redesenhar(self):
         self.area.delete("all")
         largura = self.area.winfo_width()
         y = 8
         for quem, texto in self.mensagens[-40:]:
-            lado_direito = quem == "Voce"
-            cor = BOLHA_VOCE if lado_direito else BOLHA_JARVIS
+            direita = quem == "Voce"
+            cor = BOLHA_VOCE if direita else BOLHA_JARVIS
             maximo = int(largura * 0.72)
             t = self.area.create_text(0, 0, text=quem + "\n" + texto, fill=TEXTO,
                                       font=("Segoe UI", 11), width=maximo, anchor="nw")
             x0, y0, x1, y1 = self.area.bbox(t)
             self.area.delete(t)
             altura = y1 - y0 + 18
-            if lado_direito:
+            if direita:
                 x_fim = largura - 8
                 x_ini = x_fim - (x1 - x0) - 24
             else:
                 x_ini = 8
                 x_fim = x_ini + (x1 - x0) + 24
-            retangulo_arredondado(self.area, x_ini, y, x_fim, y + altura, 14, cor)
+            self._bolha(x_ini, y, x_fim, y + altura, 14, cor)
             self.area.create_text(x_ini + 12, y + 9, text=quem + "\n" + texto, fill=TEXTO,
                                   font=("Segoe UI", 11), width=maximo, anchor="nw")
             y += altura + 10
         self.area.configure(scrollregion=(0, 0, largura, y))
         self.area.yview_moveto(1.0)
+
+    def _bolha(self, x0, y0, x1, y1, r, cor):
+        passos = 8
+        cantos = [(x1 - r, y0 + r, -90, 0), (x1 - r, y1 - r, 0, 90),
+                  (x0 + r, y1 - r, 90, 180), (x0 + r, y0 + r, 180, 270)]
+        pontos = []
+        for cx, cy, a0, a1 in cantos:
+            for i in range(passos + 1):
+                a = math.radians(a0 + (a1 - a0) * i / passos)
+                pontos += [cx + r * math.cos(a), cy + r * math.sin(a)]
+        self.area.create_polygon(pontos, fill=cor)
 
     def escrever(self, quem, texto):
         self.mensagens.append((quem, texto))
@@ -181,16 +240,39 @@ class Interface:
     def _pulsar(self):
         t = time.time() - self.inicio
         f = 0.65 + 0.35 * math.sin(2 * math.pi * t / 1.2)
-        cor = misturar("#1f2229", CORES[self.estado], f)
-        self.canvas_estado.itemconfig(self.circulo, fill=cor)
+        cor = misturar("#0b0f16", CORES[self.estado], f)
+        self.canvas_nucleo.update_idletasks()
+        largura = self.canvas_nucleo.winfo_width()
+        altura = self.canvas_nucleo.winfo_height()
+        cx, cy = largura / 2, altura / 2
+        raio = min(cx, cy) - 12
+        self.canvas_nucleo.coords(self.anel_externo, cx - raio, cy - raio, cx + raio, cy + raio)
+        r2 = raio * 0.72
+        self.canvas_nucleo.coords(self.anel_medio, cx - r2, cy - r2, cx + r2, cy + r2)
+        r3 = raio * 0.42 * f + 6
+        self.canvas_nucleo.coords(self.nucleo, cx - r3, cy - r3, cx + r3, cy + r3)
+        self.canvas_nucleo.itemconfig(self.nucleo, fill=cor)
         if self.rodando:
             self.raiz.after(60, self._pulsar)
 
-    def _atualizar_relogio(self):
-        self.label_hora.configure(text=time.strftime("%H:%M"))
+    def _atualizar_painel(self):
+        agora = time.localtime()
+        self.label_hora.configure(text=time.strftime("%H:%M", agora))
+        self.label_data.configure(text=time.strftime("%d/%m/%Y", agora))
+        self.label_clima.configure(text=self.clima)
         self.label_acao.configure(text=self.ultima_acao)
+        if self.emails is None:
+            self.label_emails.configure(text="Gmail nao conectado.\nColoque credenciais.json na pasta jarvis.")
+        elif not self.emails:
+            self.label_emails.configure(text="Nenhum e-mail recente.")
+        else:
+            texto = "\n\n".join(f"{e['de']}\n{e['assunto']}" for e in self.emails)
+            self.label_emails.configure(text=texto)
         if self.rodando:
-            self.raiz.after(1000, self._atualizar_relogio)
+            self.raiz.after(60000, self._atualizar_painel)
+
+    def _carregar_emails(self):
+        self.emails = ler_emails_recentes()
 
     def _processar_fila(self):
         try:
@@ -202,6 +284,7 @@ class Interface:
                     self._definir_estado(dados)
                 elif tipo == "acao":
                     self.ultima_acao = dados
+                    self.label_acao.configure(text=dados)
         except queue.Empty:
             pass
         if self.rodando:

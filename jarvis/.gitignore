@@ -1,3 +1,5 @@
 *.onnx
 *.onnx.json
 *.wav
+credenciais.json
+token.json
