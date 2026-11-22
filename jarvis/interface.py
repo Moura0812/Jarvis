@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import queue
@@ -5,6 +6,7 @@ import re
 import threading
 import time
 import tkinter as tk
+import urllib.request
 
 import cerebro
 import maos
@@ -15,6 +17,11 @@ from jarvis import PALAVRAS_SAIR, limpar, tentar_acao
 ATIVACAO = ("jarvis", "jarves", "jarvi", "charvis", "garvis")
 SILENCIO = ("silencio", "fica quieto", "fique quieto", "cala a boca", "para de falar")
 CLIMA_PADRAO = "Brasilia: consultando a previsao"
+URL_CLIMA = (
+    "https://api.open-meteo.com/v1/forecast"
+    "?latitude=-15.7939&longitude=-47.8828"
+    "&current=temperature_2m,relative_humidity_2m,weather_code"
+)
 
 FUNDO = "#0b0f16"
 PAINEL = "#111827"
@@ -52,6 +59,40 @@ def misturar(cor_a, cor_b, f):
     a = [int(cor_a[i : i + 2], 16) for i in (1, 3, 5)]
     b = [int(cor_b[i : i + 2], 16) for i in (1, 3, 5)]
     return "#" + "".join(f"{int(x + (y - x) * f):02x}" for x, y in zip(a, b))
+
+
+def descrever_clima(codigo):
+    if codigo == 0:
+        return "ceu limpo"
+    if codigo in (1, 2):
+        return "poucas nuvens"
+    if codigo == 3:
+        return "nublado"
+    if codigo in (45, 48):
+        return "neblina"
+    if 51 <= codigo <= 57:
+        return "garoa"
+    if 61 <= codigo <= 67 or 80 <= codigo <= 82:
+        return "chuva"
+    if 71 <= codigo <= 77 or codigo in (85, 86):
+        return "neve"
+    if codigo >= 95:
+        return "trovoada"
+    return "tempo variavel"
+
+
+def buscar_clima():
+    try:
+        with urllib.request.urlopen(URL_CLIMA, timeout=10) as resposta:
+            dados = json.loads(resposta.read().decode("utf-8"))
+        atual = dados["current"]
+        temperatura = round(atual["temperature_2m"])
+        umidade = round(atual["relative_humidity_2m"])
+        descricao = descrever_clima(int(atual["weather_code"]))
+        return "Brasilia: " + str(temperatura) + "\u00b0C, " + descricao + "\nUmidade " + str(umidade) + "%"
+    except Exception as erro:
+        print("Clima:", erro)
+        return "Brasilia: clima indisponivel"
 
 
 def ler_emails_recentes(quantidade=5):
@@ -108,6 +149,7 @@ class Interface:
         self.estado = "dormindo"
         self.clima = CLIMA_PADRAO
         self.emails = None
+        self.emails_prontos = False
         self.ultima_acao = "nenhuma ainda"
         self.inicio = time.time()
 
@@ -123,7 +165,8 @@ class Interface:
         self.raiz.after(100, self._processar_fila)
         self.raiz.after(60, self._pulsar)
         self.raiz.after(1000, self._atualizar_painel)
-        threading.Thread(target=self._carregar_emails, daemon=True).start()
+        threading.Thread(target=self._loop_emails, daemon=True).start()
+        threading.Thread(target=self._loop_clima, daemon=True).start()
         threading.Thread(target=self._loop_escuta, daemon=True).start()
         raiz.protocol("WM_DELETE_WINDOW", self.fechar)
 
@@ -153,7 +196,7 @@ class Interface:
         painel.pack_propagate(False)
         tk.Label(painel, text="E-MAILS RECENTES (SO LEITURA)", bg=PAINEL, fg=SUAVE,
                  font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=16, pady=(14, 8))
-        self.label_emails = tk.Label(painel, text="Carregando...", bg=PAINEL, fg=TEXTO,
+        self.label_emails = tk.Label(painel, text="Carregando e-mails...", bg=PAINEL, fg=TEXTO,
                                      font=("Segoe UI", 9), wraplength=230, justify="left")
         self.label_emails.pack(anchor="w", padx=16, fill="x")
 
@@ -259,20 +302,38 @@ class Interface:
         agora = time.localtime()
         self.label_hora.configure(text=time.strftime("%H:%M", agora))
         self.label_data.configure(text=time.strftime("%d/%m/%Y", agora))
-        self.label_clima.configure(text=self.clima)
         self.label_acao.configure(text=self.ultima_acao)
-        if self.emails is None:
-            self.label_emails.configure(text="Gmail nao conectado.\nColoque credenciais.json na pasta jarvis.")
+        if self.rodando:
+            self.raiz.after(30000, self._atualizar_painel)
+
+    def _mostrar_emails(self):
+        if not self.emails_prontos:
+            texto = "Carregando e-mails..."
+        elif self.emails is None:
+            texto = "Gmail nao conectado.\nVeja a linha Gmail: no CMD."
         elif not self.emails:
-            self.label_emails.configure(text="Nenhum e-mail recente.")
+            texto = "Nenhum e-mail recente."
         else:
             texto = "\n\n".join(f"{e['de']}\n{e['assunto']}" for e in self.emails)
-            self.label_emails.configure(text=texto)
-        if self.rodando:
-            self.raiz.after(60000, self._atualizar_painel)
+        self.label_emails.configure(text=texto)
 
-    def _carregar_emails(self):
-        self.emails = ler_emails_recentes()
+    def _loop_emails(self):
+        while self.rodando:
+            resultado = ler_emails_recentes()
+            self.fila.put(("emails", resultado))
+            espera = 60 if resultado is None else 300
+            for _ in range(espera):
+                if not self.rodando:
+                    return
+                time.sleep(1)
+
+    def _loop_clima(self):
+        while self.rodando:
+            self.fila.put(("clima", buscar_clima()))
+            for _ in range(900):
+                if not self.rodando:
+                    return
+                time.sleep(1)
 
     def _processar_fila(self):
         try:
@@ -285,6 +346,13 @@ class Interface:
                 elif tipo == "acao":
                     self.ultima_acao = dados
                     self.label_acao.configure(text=dados)
+                elif tipo == "clima":
+                    self.clima = dados
+                    self.label_clima.configure(text=dados)
+                elif tipo == "emails":
+                    self.emails = dados
+                    self.emails_prontos = True
+                    self._mostrar_emails()
         except queue.Empty:
             pass
         if self.rodando:
