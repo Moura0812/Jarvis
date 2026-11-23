@@ -26,6 +26,9 @@ def extrair_comando(frase):
 
 def tentar_acao(frase):
     f = limpar(frase)
+    controle = maos.controlar_sistema(f)
+    if controle is not None:
+        return controle
     if not re.search(r"\b(abr[ae]|abrir|abra|inicie|iniciar)\b", f):
         return None
     for nome in maos.PROGRAMAS:

@@ -28,6 +28,14 @@ URLS_NOTICIAS = (
     "https://agenciabrasil.ebc.com.br/feed/ultimasnoticias/feed.xml",
     "http://agenciabrasil.ebc.com.br/feed/ultimasnoticias/feed.xml",
 )
+NS = {"a": "http://www.w3.org/2005/Atom"}
+URL_VIDEOS = "https://www.youtube.com/feeds/videos.xml?channel_id="
+CANAIS = (
+    ("Filipe Deschamps", "UCU5JicSrEM5A63jkJ2QvGYw"),
+    ("Codigo Fonte TV", "@codigofontetv"),
+    ("Curso em Video", "@cursoemvideo"),
+)
+_ids_canais = {}
 
 FUNDO = "#0b0f16"
 PAINEL = "#111827"
@@ -96,6 +104,16 @@ def resposta_local(comando, noticias, emails, clima, agora):
     return None
 
 
+def resposta_videos(comando, videos):
+    palavras = limpar(comando).split()
+    if not any(p.startswith("video") for p in palavras):
+        return None
+    if not videos:
+        return "Ainda não consegui carregar os vídeos."
+    partes = [v["canal"] + ". " + v["titulo"].rstrip(".?!") + "." for v in videos[:3]]
+    return "Os vídeos mais recentes são. " + " ".join(partes)
+
+
 def descrever_clima(codigo):
     if codigo == 0:
         return "ceu limpo"
@@ -156,6 +174,52 @@ def formatar_noticias(titulos):
     return "\n\n".join("- " + t for t in titulos) + "\n\nFonte: Agencia Brasil"
 
 
+def _pedir(url):
+    pedido = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 Jarvis"})
+    with urllib.request.urlopen(pedido, timeout=10) as resposta:
+        return resposta.read()
+
+
+def resolver_canal(ref):
+    if ref.startswith("UC"):
+        return ref
+    if ref in _ids_canais:
+        return _ids_canais[ref]
+    html = _pedir("https://www.youtube.com/" + ref).decode("utf-8", "ignore")
+    padroes = (
+        r'rel="canonical" href="https://www\.youtube\.com/channel/(UC[\w-]{22})"',
+        r'"externalId":"(UC[\w-]{22})"',
+        r'"channelId":"(UC[\w-]{22})"',
+    )
+    for padrao in padroes:
+        achado = re.search(padrao, html)
+        if achado:
+            _ids_canais[ref] = achado.group(1)
+            return achado.group(1)
+    raise ValueError("nao achei o codigo do canal " + ref)
+
+
+def buscar_videos():
+    resultados = []
+    for nome, ref in CANAIS:
+        try:
+            codigo = resolver_canal(ref)
+            raiz = ET.fromstring(_pedir(URL_VIDEOS + codigo))
+            entrada = raiz.find("a:entry", NS)
+            titulo = (entrada.findtext("a:title", "", NS) or "").strip()
+            if titulo:
+                resultados.append({"canal": nome, "titulo": titulo[:80]})
+        except Exception as erro:
+            print("Videos:", nome, erro)
+    return resultados or None
+
+
+def formatar_videos(videos):
+    if not videos:
+        return "Videos indisponiveis."
+    return "\n\n".join(v["canal"] + "\n" + v["titulo"] for v in videos)
+
+
 def ler_emails_recentes(quantidade=5):
     """Le os e-mails recentes da caixa de entrada, somente para leitura.
     Devolve uma lista de dicionarios, ou None se o Gmail nao estiver conectado."""
@@ -210,6 +274,7 @@ class Interface:
         self.estado = "dormindo"
         self.clima = CLIMA_PADRAO
         self.noticias = None
+        self.videos = None
         self.emails = None
         self.emails_prontos = False
         self.ultima_acao = "nenhuma ainda"
@@ -230,6 +295,7 @@ class Interface:
         threading.Thread(target=self._loop_emails, daemon=True).start()
         threading.Thread(target=self._loop_clima, daemon=True).start()
         threading.Thread(target=self._loop_noticias, daemon=True).start()
+        threading.Thread(target=self._loop_videos, daemon=True).start()
         threading.Thread(target=self._loop_escuta, daemon=True).start()
         raiz.protocol("WM_DELETE_WINDOW", self.fechar)
 
@@ -267,6 +333,12 @@ class Interface:
         self.label_emails = tk.Label(painel, text="Carregando e-mails...", bg=PAINEL, fg=TEXTO,
                                      font=("Segoe UI", 9), wraplength=230, justify="left")
         self.label_emails.pack(anchor="w", padx=16, fill="x")
+
+        tk.Label(painel, text="VIDEOS RECENTES", bg=PAINEL, fg=SUAVE,
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=16, pady=(18, 8))
+        self.label_videos = tk.Label(painel, text="Carregando videos...", bg=PAINEL, fg=TEXTO,
+                                     font=("Segoe UI", 9), wraplength=230, justify="left")
+        self.label_videos.pack(anchor="w", padx=16, fill="x")
 
     def _montar_centro(self):
         meio = tk.Frame(self.raiz, bg=FUNDO)
@@ -382,7 +454,7 @@ class Interface:
         elif not self.emails:
             texto = "Nenhum e-mail recente."
         else:
-            texto = "\n\n".join(f"{e['de']}\n{e['assunto']}" for e in self.emails)
+            texto = "\n\n".join(f"{e['de']}\n{e['assunto']}" for e in self.emails[:3])
         self.label_emails.configure(text=texto)
 
     def _loop_emails(self):
@@ -413,6 +485,16 @@ class Interface:
                     return
                 time.sleep(1)
 
+    def _loop_videos(self):
+        while self.rodando:
+            videos = buscar_videos()
+            self.fila.put(("videos", videos))
+            espera = 120 if not videos else 1800
+            for _ in range(espera):
+                if not self.rodando:
+                    return
+                time.sleep(1)
+
     def _processar_fila(self):
         try:
             while True:
@@ -430,6 +512,9 @@ class Interface:
                 elif tipo == "noticias":
                     self.noticias = dados
                     self.label_noticias.configure(text=formatar_noticias(dados))
+                elif tipo == "videos":
+                    self.videos = dados
+                    self.label_videos.configure(text=formatar_videos(dados))
                 elif tipo == "emails":
                     self.emails = dados
                     self.emails_prontos = True
@@ -512,6 +597,8 @@ class Interface:
             self.raiz.after(0, self.fechar)
             return
         local = resposta_local(comando, self.noticias, self.emails, self.clima, time.localtime())
+        if local is None:
+            local = resposta_videos(comando, self.videos)
         if local is not None:
             self.fila.put(("acao", "Li os dados do painel"))
             self._falar_longo(local)
