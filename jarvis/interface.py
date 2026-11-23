@@ -7,6 +7,7 @@ import threading
 import time
 import tkinter as tk
 import urllib.request
+import xml.etree.ElementTree as ET
 
 import cerebro
 import maos
@@ -21,6 +22,11 @@ URL_CLIMA = (
     "https://api.open-meteo.com/v1/forecast"
     "?latitude=-15.7939&longitude=-47.8828"
     "&current=temperature_2m,relative_humidity_2m,weather_code"
+)
+URLS_NOTICIAS = (
+    "https://agenciabrasil.ebc.com.br/rss/ultimasnoticias/feed.xml",
+    "https://agenciabrasil.ebc.com.br/feed/ultimasnoticias/feed.xml",
+    "http://agenciabrasil.ebc.com.br/feed/ultimasnoticias/feed.xml",
 )
 
 FUNDO = "#0b0f16"
@@ -61,6 +67,35 @@ def misturar(cor_a, cor_b, f):
     return "#" + "".join(f"{int(x + (y - x) * f):02x}" for x, y in zip(a, b))
 
 
+def resposta_local(comando, noticias, emails, clima, agora):
+    f = " " + " ".join(limpar(comando).split()) + " "
+    palavras = f.split()
+    if any(p.startswith("noticia") or p.startswith("manchete") for p in palavras):
+        if not noticias:
+            return "Ainda não consegui carregar as notícias."
+        return "As principais notícias são. " + " ".join(t.rstrip(".") + "." for t in noticias[:3])
+    if (any(p in ("email", "emails", "gmail", "correio") for p in palavras)
+            or " e mail " in f or " e mails " in f or "caixa de entrada" in f):
+        if emails is None:
+            return "Não consegui acessar os seus e-mails agora."
+        if not emails:
+            return "Você não tem e-mails recentes."
+        partes = []
+        for e in emails[:3]:
+            remetente = e.get("de") or "remetente desconhecido"
+            partes.append("De " + remetente + ". Assunto: " + e.get("assunto", "").rstrip(".") + ".")
+        return "Seus e-mails mais recentes são. " + " ".join(partes)
+    if any(p in ("clima", "temperatura", "previsao", "chover", "chuva") for p in palavras):
+        if not clima or "indisponivel" in clima or "consultando" in clima:
+            return "Ainda não consegui consultar o clima."
+        return clima.replace("\n", ". ").replace("\u00b0C", " graus") + "."
+    if " que horas " in f or " horas sao " in f or " hora e " in f:
+        return "São " + str(agora.tm_hour) + " horas e " + str(agora.tm_min) + " minutos."
+    if " que dia " in f or " data de hoje " in f or " qual a data " in f:
+        return "Hoje é " + time.strftime("%d/%m/%Y", agora) + "."
+    return None
+
+
 def descrever_clima(codigo):
     if codigo == 0:
         return "ceu limpo"
@@ -93,6 +128,32 @@ def buscar_clima():
     except Exception as erro:
         print("Clima:", erro)
         return "Brasilia: clima indisponivel"
+
+
+def buscar_noticias(quantidade=3):
+    for url in URLS_NOTICIAS:
+        try:
+            pedido = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 Jarvis"})
+            with urllib.request.urlopen(pedido, timeout=10) as resposta:
+                raiz = ET.fromstring(resposta.read())
+            titulos = []
+            for item in raiz.iter("item"):
+                titulo = (item.findtext("title") or "").strip()
+                if titulo:
+                    titulos.append(titulo[:90])
+                if len(titulos) >= quantidade:
+                    break
+            if titulos:
+                return titulos
+        except Exception as erro:
+            print("Noticias:", erro)
+    return None
+
+
+def formatar_noticias(titulos):
+    if not titulos:
+        return "Noticias indisponiveis."
+    return "\n\n".join("- " + t for t in titulos) + "\n\nFonte: Agencia Brasil"
 
 
 def ler_emails_recentes(quantidade=5):
@@ -148,6 +209,7 @@ class Interface:
         self.rodando = True
         self.estado = "dormindo"
         self.clima = CLIMA_PADRAO
+        self.noticias = None
         self.emails = None
         self.emails_prontos = False
         self.ultima_acao = "nenhuma ainda"
@@ -167,6 +229,7 @@ class Interface:
         self.raiz.after(1000, self._atualizar_painel)
         threading.Thread(target=self._loop_emails, daemon=True).start()
         threading.Thread(target=self._loop_clima, daemon=True).start()
+        threading.Thread(target=self._loop_noticias, daemon=True).start()
         threading.Thread(target=self._loop_escuta, daemon=True).start()
         raiz.protocol("WM_DELETE_WINDOW", self.fechar)
 
@@ -188,7 +251,12 @@ class Interface:
         tk.Label(painel, text="ULTIMA ACAO", bg=PAINEL, fg=SUAVE, font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=16)
         self.label_acao = tk.Label(painel, text=self.ultima_acao, bg=PAINEL, fg=TEXTO,
                                    font=("Segoe UI", 10), wraplength=190, justify="left")
-        self.label_acao.pack(anchor="w", padx=16)
+        self.label_acao.pack(anchor="w", padx=16, pady=(0, 18))
+
+        tk.Label(painel, text="NOTICIAS", bg=PAINEL, fg=SUAVE, font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=16)
+        self.label_noticias = tk.Label(painel, text="Carregando noticias...", bg=PAINEL, fg=TEXTO,
+                                       font=("Segoe UI", 9), wraplength=190, justify="left")
+        self.label_noticias.pack(anchor="w", padx=16)
 
     def _montar_direita(self):
         painel = tk.Frame(self.raiz, bg=PAINEL, width=260)
@@ -335,6 +403,16 @@ class Interface:
                     return
                 time.sleep(1)
 
+    def _loop_noticias(self):
+        while self.rodando:
+            titulos = buscar_noticias()
+            self.fila.put(("noticias", titulos))
+            espera = 120 if not titulos else 1800
+            for _ in range(espera):
+                if not self.rodando:
+                    return
+                time.sleep(1)
+
     def _processar_fila(self):
         try:
             while True:
@@ -349,6 +427,9 @@ class Interface:
                 elif tipo == "clima":
                     self.clima = dados
                     self.label_clima.configure(text=dados)
+                elif tipo == "noticias":
+                    self.noticias = dados
+                    self.label_noticias.configure(text=formatar_noticias(dados))
                 elif tipo == "emails":
                     self.emails = dados
                     self.emails_prontos = True
@@ -415,11 +496,25 @@ class Interface:
         finally:
             self.falando.clear()
 
+    def _falar_longo(self, texto):
+        self.fila.put(("escrever", ("Jarvis", texto)))
+        self.fila.put(("estado", "falando"))
+        self.falando.set()
+        try:
+            voz.falar_em_pedacos(iter([texto]))
+        finally:
+            self.falando.clear()
+
     def _executar(self, comando):
         self.fila.put(("estado", "pensando"))
         if any(p in limpar(comando).split() for p in PALAVRAS_SAIR):
             self._falar("Encerrando. Ate logo.")
             self.raiz.after(0, self.fechar)
+            return
+        local = resposta_local(comando, self.noticias, self.emails, self.clima, time.localtime())
+        if local is not None:
+            self.fila.put(("acao", "Li os dados do painel"))
+            self._falar_longo(local)
             return
         acao = tentar_acao(comando)
         if acao is not None:
