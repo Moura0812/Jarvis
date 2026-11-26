@@ -4,6 +4,7 @@ import unicodedata
 import cerebro
 import maos
 import ouvidos
+import pesquisa
 import voz
 
 PALAVRAS_SAIR = ("sair", "encerrar", "tchau", "desligar")
@@ -29,6 +30,11 @@ def tentar_acao(frase):
     controle = maos.controlar_sistema(f)
     if controle is not None:
         return controle
+    consulta = pesquisa.extrair_consulta(f)
+    if consulta is not None:
+        if not consulta:
+            return "O que o senhor quer que eu pesquise?"
+        return pesquisa.pesquisar(consulta)
     if not re.search(r"\b(abr[ae]|abrir|abra|inicie|iniciar)\b", f):
         return None
     for nome in maos.PROGRAMAS:
